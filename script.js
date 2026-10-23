@@ -22,23 +22,54 @@ const chapters = [...document.querySelectorAll('.chapter')];
 const progressBar = document.querySelector('.progress');
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const frameMode = location.hash === '#frame';
-const touchDevice = navigator.maxTouchPoints > 0;
+const smallScreen = window.matchMedia('(max-width: 760px)').matches;
+const touchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+const mobileFilm = smallScreen || touchDevice;
+const canPlayFilm = !!film?.canPlayType?.('video/mp4');
+const storyDisabled = reduceMotion || frameMode || !canPlayFilm;
 let seekPending = false;
 let smoothTime = 0;
 let targetTime = 0;
 let filmDuration = 10;
 let activeChapter = -1;
+let lastSeekAt = 0;
+let metadataReady = false;
+let videoFailed = false;
+let metadataTimer;
 
-if (film && !reduceMotion && !frameMode) {
-  film.src = touchDevice ? 'assets/floral-mobile.mp4' : 'assets/floral-desktop.mp4';
-  if (touchDevice) film.poster = 'assets/floral-mobile-poster.png';
+function disableVideoStory() {
+  if (videoFailed || frameMode) return;
+  videoFailed = true;
+  clearTimeout(metadataTimer);
+  hero?.classList.add('film-error');
+  track?.classList.add('story-fallback');
+  stage?.classList.remove('is-gone');
+  film?.pause();
+  updateSiteHeader();
+}
+
+if (storyDisabled && !frameMode) track?.classList.add('story-fallback');
+
+if (film && !storyDisabled) {
+  film.src = mobileFilm ? 'assets/floral-mobile.mp4' : 'assets/floral-desktop.mp4';
+  if (mobileFilm) film.poster = 'assets/floral-mobile-poster.png';
+  film.preload = 'auto';
   film.load();
-  film.addEventListener('loadedmetadata', () => { filmDuration = film.duration || 10; });
-  film.addEventListener('seeked', () => { seekPending = false; });
-  film.addEventListener('error', () => { seekPending = false; hero?.classList.add('film-error'); });
+  metadataTimer = setTimeout(() => { if (!metadataReady) disableVideoStory(); }, 9000);
+  film.addEventListener('loadedmetadata', () => {
+    if (!Number.isFinite(film.duration) || film.duration <= 0) return disableVideoStory();
+    metadataReady = true;
+    filmDuration = film.duration;
+    clearTimeout(metadataTimer);
+    scheduleTick();
+  });
+  film.addEventListener('seeked', () => { seekPending = false; scheduleTick(); });
+  film.addEventListener('error', disableVideoStory);
+  film.addEventListener('stalled', () => { if (!metadataReady) disableVideoStory(); });
   if (touchDevice) {
     document.addEventListener('touchstart', () => {
-      film.play().then(() => { film.pause(); }).catch(() => {});
+      const promise = film.play();
+      if (promise && typeof promise.then === 'function') promise.then(() => film.pause()).catch(() => { });
     }, { once: true, passive: true });
   }
 }
@@ -48,17 +79,24 @@ function scrollProgress() {
   return Math.min(1, Math.max(0, (window.scrollY - track.offsetTop) / span));
 }
 
+let rafScheduled = false;
+function scheduleTick() {
+  if (rafScheduled) return;
+  rafScheduled = true;
+  requestAnimationFrame(tick);
+}
 function tick() {
-  if (!track) return;
+  rafScheduled = false;
+  if (!track || !hero) return;
   const p = scrollProgress();
+  const filmVisible = !storyDisabled && !videoFailed && metadataReady;
   const dissolve = Math.min(1, p / .03);
-  const filmVisible = !reduceMotion && !frameMode && !hero.classList.contains('film-error');
   hero.style.setProperty('--static-opacity', filmVisible ? String(1 - dissolve) : '1');
   hero.style.setProperty('--film-opacity', filmVisible ? String(dissolve) : '0');
   const chapterOpacity = Math.min(1, Math.max(0, (p - .03) / .03));
-  hero.style.setProperty('--chapter-opacity', frameMode ? '0' : String(chapterOpacity));
+  hero.style.setProperty('--chapter-opacity', filmVisible ? String(chapterOpacity) : '0');
   hero.style.setProperty('--progress', `${(p * 100).toFixed(2)}%`);
-  stage.classList.toggle('is-gone', filmVisible && dissolve >= 1);
+  stage?.classList.toggle('is-gone', filmVisible && dissolve >= 1);
   progressBar?.setAttribute('aria-valuenow', String(Math.round(p * 100)));
   const storyP = Math.max(0, (p - .03) / .97);
   const chapter = Math.min(2, Math.floor(storyP * 3));
@@ -67,17 +105,28 @@ function tick() {
     chapters.forEach((item, i) => item.classList.toggle('is-active', i === chapter));
     chapterLinks.forEach((item, i) => i === chapter ? item.setAttribute('aria-current', 'true') : item.removeAttribute('aria-current'));
   }
-  if (filmVisible && film.readyState >= 2) {
+  if (filmVisible && film.readyState >= 2 && filmDuration > .05) {
     targetTime = p <= .03 ? 0 : Math.min(filmDuration - .04, storyP * (filmDuration - .04));
-    smoothTime += (targetTime - smoothTime) * .22;
+    smoothTime += (targetTime - smoothTime) * .28;
     if (Math.abs(targetTime - smoothTime) < .012) smoothTime = targetTime;
-    if (!seekPending && !film.seeking && Math.abs(film.currentTime - smoothTime) > .035) {
-      seekPending = true;
-      film.currentTime = Math.min(filmDuration - .04, Math.max(0, smoothTime));
+    // iOS/Safari may never emit seeked after a seek. Recover or fall back.
+    if (seekPending && performance.now() - lastSeekAt > 2500) {
+      seekPending = false;
+      if (Math.abs(film.currentTime - smoothTime) > .5) disableVideoStory();
+    }
+    if (!seekPending && !film.seeking && Math.abs(film.currentTime - smoothTime) > .07) {
+      try {
+        seekPending = true;
+        lastSeekAt = performance.now();
+        setTimeout(() => { if (seekPending && !videoFailed && performance.now() - lastSeekAt >= 2400) { seekPending = false; if (Math.abs(film.currentTime - smoothTime) > .5) disableVideoStory(); } }, 2600);
+        film.currentTime = Math.min(filmDuration - .04, Math.max(0, smoothTime));
+      } catch (_) { disableVideoStory(); }
     }
   }
-  requestAnimationFrame(tick);
 }
+window.addEventListener('scroll', scheduleTick, { passive: true });
+window.addEventListener('resize', scheduleTick, { passive: true });
+window.addEventListener('pageshow', scheduleTick);
 
 chapterLinks.forEach((item, i) => item.addEventListener('click', event => {
   event.preventDefault();
@@ -85,16 +134,16 @@ chapterLinks.forEach((item, i) => item.addEventListener('click', event => {
   window.scrollTo({ top: track.offsetTop + span * (.03 + i * .97 / 3), behavior: reduceMotion ? 'instant' : 'smooth' });
 }));
 
-if (track) requestAnimationFrame(tick);
+if (track) scheduleTick();
 
 // Continuation navigation: the original opening header remains visually untouched.
 const siteHeader = document.querySelector('#site-header');
 const siteMenuButton = document.querySelector('.site-menu-button');
 const siteMobileNav = document.querySelector('#site-mobile-nav');
 const sectionLinks = [...document.querySelectorAll('[data-section-link]')];
-const siteSections = ['inicio','essencia','colecao','atelier','encomendas'].map(id => document.getElementById(id)).filter(Boolean);
+const siteSections = ['inicio', 'essencia', 'colecao', 'atelier', 'encomendas'].map(id => document.getElementById(id)).filter(Boolean);
 function updateSiteHeader() {
-  const show = window.scrollY > Math.max(30, track.offsetHeight * .03);
+  const show = window.scrollY > Math.max(30, (track?.offsetHeight || window.innerHeight) * (track?.classList.contains('story-fallback') ? .75 : .03));
   siteHeader?.classList.toggle('is-visible', show);
   siteHeader?.setAttribute('aria-hidden', String(!show));
   if (!show && siteMobileNav && !siteMobileNav.hidden) closeSiteMenu();
@@ -123,15 +172,17 @@ function setActiveSection(id) {
   });
 }
 setActiveSection('inicio');
-const sectionObserver = new IntersectionObserver(entries => {
-  for (const entry of entries) {
-    if (entry.isIntersecting) setActiveSection(entry.target.id);
-  }
-}, { rootMargin: '-22% 0px -62% 0px', threshold: 0 });
-siteSections.forEach(section => sectionObserver.observe(section));
+if ('IntersectionObserver' in window) {
+  const sectionObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) setActiveSection(entry.target.id);
+    }
+  }, { rootMargin: '-22% 0px -62% 0px', threshold: 0 });
+  siteSections.forEach(section => sectionObserver.observe(section));
+}
 
 const revealItems = [...document.querySelectorAll('.section .reveal')];
-if (!reduceMotion && window.gsap) {
+if (!reduceMotion && window.gsap && 'IntersectionObserver' in window) {
   const revealObserver = new IntersectionObserver(entries => {
     entries.filter(entry => entry.isIntersecting).forEach(entry => {
       const element = entry.target;
