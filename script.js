@@ -34,6 +34,7 @@ let filmDuration = 10;
 let activeChapter = -1;
 let lastSeekAt = 0;
 let metadataReady = false;
+let frameReady = false;
 let videoFailed = false;
 let metadataTimer;
 
@@ -44,6 +45,7 @@ function disableVideoStory() {
   hero?.classList.add('film-error');
   track?.classList.add('story-fallback');
   stage?.classList.remove('is-gone');
+  if (stage) stage.inert = false;
   film?.pause();
   updateSiteHeader();
 }
@@ -54,18 +56,22 @@ if (film && !storyDisabled) {
   film.src = mobileFilm ? 'assets/floral-mobile.mp4' : 'assets/floral-desktop.mp4';
   if (mobileFilm) film.poster = 'assets/floral-mobile-poster.png';
   film.preload = 'auto';
-  film.load();
-  metadataTimer = setTimeout(() => { if (!metadataReady) disableVideoStory(); }, 9000);
+  metadataTimer = setTimeout(() => { if (!frameReady) disableVideoStory(); }, 9000);
   film.addEventListener('loadedmetadata', () => {
     if (!Number.isFinite(film.duration) || film.duration <= 0) return disableVideoStory();
     metadataReady = true;
     filmDuration = film.duration;
+    scheduleTick();
+  });
+  film.addEventListener('loadeddata', () => {
+    frameReady = true;
     clearTimeout(metadataTimer);
     scheduleTick();
   });
   film.addEventListener('seeked', () => { seekPending = false; scheduleTick(); });
   film.addEventListener('error', disableVideoStory);
-  film.addEventListener('stalled', () => { if (!metadataReady) disableVideoStory(); });
+  film.addEventListener('stalled', () => { if (!frameReady) disableVideoStory(); });
+  film.load();
   if (touchDevice) {
     document.addEventListener('touchstart', () => {
       const promise = film.play();
@@ -75,7 +81,7 @@ if (film && !storyDisabled) {
 }
 
 function scrollProgress() {
-  const span = Math.max(1, track.offsetHeight - window.innerHeight);
+  const span = Math.max(1, track.offsetHeight - hero.clientHeight);
   return Math.min(1, Math.max(0, (window.scrollY - track.offsetTop) / span));
 }
 
@@ -89,7 +95,7 @@ function tick() {
   rafScheduled = false;
   if (!track || !hero) return;
   const p = scrollProgress();
-  const filmVisible = !storyDisabled && !videoFailed && metadataReady;
+  const filmVisible = !storyDisabled && !videoFailed && metadataReady && frameReady;
   const dissolve = Math.min(1, p / .03);
   hero.style.setProperty('--static-opacity', filmVisible ? String(1 - dissolve) : '1');
   hero.style.setProperty('--film-opacity', filmVisible ? String(dissolve) : '0');
@@ -97,6 +103,7 @@ function tick() {
   hero.style.setProperty('--chapter-opacity', filmVisible ? String(chapterOpacity) : '0');
   hero.style.setProperty('--progress', `${(p * 100).toFixed(2)}%`);
   stage?.classList.toggle('is-gone', filmVisible && dissolve >= 1);
+  if (stage) stage.inert = filmVisible && dissolve >= 1;
   progressBar?.setAttribute('aria-valuenow', String(Math.round(p * 100)));
   const storyP = Math.max(0, (p - .03) / .97);
   const chapter = Math.min(2, Math.floor(storyP * 3));
@@ -109,6 +116,7 @@ function tick() {
     targetTime = p <= .03 ? 0 : Math.min(filmDuration - .04, storyP * (filmDuration - .04));
     smoothTime += (targetTime - smoothTime) * .28;
     if (Math.abs(targetTime - smoothTime) < .012) smoothTime = targetTime;
+    else scheduleTick();
     // iOS/Safari may never emit seeked after a seek. Recover or fall back.
     if (seekPending && performance.now() - lastSeekAt > 2500) {
       seekPending = false;
@@ -130,7 +138,7 @@ window.addEventListener('pageshow', scheduleTick);
 
 chapterLinks.forEach((item, i) => item.addEventListener('click', event => {
   event.preventDefault();
-  const span = Math.max(1, track.offsetHeight - innerHeight);
+  const span = Math.max(1, track.offsetHeight - hero.clientHeight);
   window.scrollTo({ top: track.offsetTop + span * (.03 + i * .97 / 3), behavior: reduceMotion ? 'instant' : 'smooth' });
 }));
 
